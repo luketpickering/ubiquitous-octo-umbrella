@@ -23,6 +23,7 @@
 #include "TFile.h"
 #include "TH1D.h"
 #include "TH2D.h"
+#include "TH3D.h"
 
 double ToGeV = 1;
 double fatx = 1;
@@ -31,11 +32,18 @@ NuHepMC::StatusCodeDescriptors vtxstatus;
 NuHepMC::StatusCodeDescriptors partstatus;
 NuHepMC::StatusCodeDescriptors proc_ids;
 
+std::unique_ptr<TH2D> TrueChannelToFSTopo;
+
 // plots
+std::unique_ptr<TH1D> PreFSIKinematics_1p;
+
 std::unique_ptr<TH2D> TotalNeutronKE_1p_only;
 std::unique_ptr<TH2D> TotalNeutralE_1p_only;
-std::unique_ptr<TH2D> TotalPi0E_1piplus_1p;
-std::unique_ptr<TH2D> TotalNeutralE_1piplus_1p;
+
+std::unique_ptr<TH2D> PreFSIKinematics_1piplus_1p;
+
+std::unique_ptr<TH3D> TotalPi0E_1piplus_1p;
+std::unique_ptr<TH3D> TotalNeutralE_1piplus_1p;
 
 // transparency
 std::map<Classification,
@@ -111,63 +119,90 @@ std::pair<double, double> GetNeutronNeutralEnergy(HepMC3::GenEvent &evt) {
   return NeutronNeutralEnergy;
 }
 
-HepMC3::ConstGenParticlePtr
-GetPrimaryParticle(Classification c,
-                   std::vector<HepMC3::ConstGenParticlePtr> const &parts) {
+std::pair<HepMC3::ConstGenParticlePtr, HepMC3::ConstGenParticlePtr>
+GetPrimaryParticles(Classification c,
+                    std::vector<HepMC3::ConstGenParticlePtr> const &parts) {
+
+  std::pair<HepMC3::ConstGenParticlePtr, HepMC3::ConstGenParticlePtr> pparts{
+      nullptr, nullptr};
+
   for (auto const &part : parts) {
     switch (c) {
     case k1p_only: {
       if (part->pid() == 2212) {
-        return part;
+        return {part, nullptr};
       }
     }
     case k1n_only: {
       if (part->pid() == 2112) {
-        return part;
+        return {part, nullptr};
       }
     }
     case k1pi0_1p: {
       if (part->pid() == 111) {
-        return part;
+        pparts.first = part;
+      }
+      if (part->pid() == 2212) {
+        pparts.second = part;
       }
     }
     case k1piplus_1p: {
       if (part->pid() == 211) {
-        return part;
+        pparts.first = part;
+      }
+      if (part->pid() == 2212) {
+        pparts.second = part;
       }
     }
     }
   }
-  return nullptr;
+  return pparts;
 }
+
+bool isGENIE = false;
 
 void ProcessEvent(HepMC3::GenEvent &evt) {
 
-  auto pc_pos =
-      std::find(pclasses.begin(), pclasses.end(), PrimaryClassification(evt));
+  auto pc_pos = std::find(pclasses.begin(), pclasses.end(),
+                          PrimaryClassification(evt, ToGeV, isGENIE));
 
   if (pc_pos == pclasses.end()) {
     return;
   }
   auto pclass = *pc_pos;
 
-  auto fsclass = FSClassification(evt);
+  auto fsclass = FSClassification(evt, ToGeV);
   PrimaryToFinalStateSmearing->Fill(fsclass, pclass);
+  TrueChannelToFSTopo->Fill(fsclass, NuHepMC::ER3::ReadProcessID(evt));
+
+  // if (isGENIE && (pclass == k1p_only) && (fsclass == kother)) {
+  //   HepMC3::Print::listing(evt);
+
+  //   std::cout << "***********************" << std::endl;
+  //   for (auto const &pt : evt.particles()) {
+  //     if (pt->status() == NuHepMC::ParticleStatus::UndecayedPhysical) {
+  //       HepMC3::Print::line(pt);
+  //     }
+  //   }
+  //   std::cout << "***********************" << std::endl;
+  // }
 
   double w = evt.weights()[0];
 
-  HepMC3::ConstGenParticlePtr primpart = GetPrimaryParticle(
-      pclass, NuHepMC::Event::GetPrimaryVertex(evt)->particles_out());
+  auto primparts =
+      GetPrimaryParticles(pclass, GetPreFSIParticles(evt, isGENIE));
 
-  double pKE = (primpart->momentum().e() - primpart->momentum().m()) * ToGeV;
+  double pKE =
+      (primparts.first->momentum().e() - primparts.first->momentum().m()) *
+      ToGeV;
 
   if (fsclass == pclass) {
-    HepMC3::ConstGenParticlePtr fspart = GetPrimaryParticle(
+    auto fspparts = GetPrimaryParticles(
         pclass, NuHepMC::Event::GetParticles_All(
                     evt, NuHepMC::ParticleStatus::UndecayedPhysical));
 
-    auto fs_mom = fspart->momentum();
-    auto prim_mom = primpart->momentum();
+    auto fs_mom = fspparts.first->momentum();
+    auto prim_mom = primparts.first->momentum();
 
     double costheta = (fs_mom.x() * prim_mom.x() + fs_mom.y() * prim_mom.y() +
                        fs_mom.z() * prim_mom.z()) /
@@ -189,14 +224,23 @@ void ProcessEvent(HepMC3::GenEvent &evt) {
     auto NeutronNeutralEnergy = GetNeutronNeutralEnergy(evt);
     TotalNeutronKE_1p_only->Fill(NeutronNeutralEnergy.first * ToGeV, pKE, w);
     TotalNeutralE_1p_only->Fill(NeutronNeutralEnergy.second * ToGeV, pKE, w);
+    PreFSIKinematics_1p->Fill(pKE, w);
     break;
   }
   case k1piplus_1p: {
     auto NeutronNeutralEnergy = GetNeutronNeutralEnergy(evt);
+    double pprotKE =
+        (primparts.second->momentum().e() - primparts.second->momentum().m()) *
+        ToGeV;
+
     TotalPi0E_1piplus_1p->Fill(
-        (NeutronNeutralEnergy.second - NeutronNeutralEnergy.first) * ToGeV, pKE,
-        w);
-    TotalNeutralE_1piplus_1p->Fill(NeutronNeutralEnergy.second * ToGeV, pKE, w);
+        (NeutronNeutralEnergy.second - NeutronNeutralEnergy.first) * ToGeV,
+        pprotKE, pKE, w);
+    TotalNeutralE_1piplus_1p->Fill(NeutronNeutralEnergy.second * ToGeV, pprotKE,
+                                   pKE, w);
+
+    PreFSIKinematics_1piplus_1p->Fill(pprotKE, pKE, w);
+
     break;
   }
   }
@@ -226,21 +270,48 @@ int main(int argc, char const *argv[]) {
 
   PrimaryToFinalStateSmearing = std::make_unique<TH2D>(
       "PrimaryToFinalStateSmearing",
-      ";Final State topo.;Post-Hard Scatter topo.;Row-normalized", kNumClass, 0,
+      ";Final State topo.;Post-Hard Scatter topo.;Count", kNumClass, 0,
       kNumClass, pclasses.size(), 0, pclasses.size());
 
+  std::vector<double> xbins = {0, 1E-8};
+  for (int i = 0; i < 80; ++i) {
+    xbins.push_back(xbins.back() + (1. / 80.));
+  }
+  std::vector<double> ybins_prot = {0, 1E-8};
+  for (int i = 0; i < 50; ++i) {
+    ybins_prot.push_back(ybins_prot.back() + (1. / 50.));
+  }
+  std::vector<double> ybins_piplus = {0, 1E-8};
+  for (int i = 0; i < 50; ++i) {
+    ybins_piplus.push_back(ybins_piplus.back() + (1 / 50.));
+  }
+
+  PreFSIKinematics_1p =
+      std::make_unique<TH1D>("PreFSIKinematics_1p", ";T_{prot}^{preFSI};Count",
+                             ybins_prot.size() - 1, ybins_prot.data());
+
   TotalNeutronKE_1p_only = std::make_unique<TH2D>(
-      "TotalNeutronKE_1p_only",
-      ";#sum T_{neutron};T_{prot}^{preFSI};Row-normalized", 81, 0, 1, 50, 0, 1);
+      "TotalNeutronKE_1p_only", ";#sum T_{neutron};T_{prot}^{preFSI};Count",
+      xbins.size() - 1, xbins.data(), ybins_prot.size() - 1, ybins_prot.data());
   TotalNeutralE_1p_only = std::make_unique<TH2D>(
-      "TotalNeutralE_1p_only",
-      ";#sum E_{neutral};T_{prot}^{preFSI};Row-normalized", 81, 0, 1, 50, 0, 1);
-  TotalPi0E_1piplus_1p = std::make_unique<TH2D>(
+      "TotalNeutralE_1p_only", ";#sum E_{neutral};T_{prot}^{preFSI};Count",
+      xbins.size() - 1, xbins.data(), ybins_prot.size() - 1, ybins_prot.data());
+
+  PreFSIKinematics_1piplus_1p = std::make_unique<TH2D>(
+      "PreFSIKinematics_1piplus_1p", ";T_{prot}^{preFSI};T_{#pi+}^{preFSI};",
+      ybins_prot.size() - 1, ybins_prot.data(), ybins_piplus.size() - 1,
+      ybins_piplus.data());
+
+  TotalPi0E_1piplus_1p = std::make_unique<TH3D>(
       "TotalPi0E_1piplus_1p",
-      ";#sum E_{#pi^{0}};T_{#pi+}^{preFSI};Row-normalized", 81, 0, 1, 50, 0, 1);
-  TotalNeutralE_1piplus_1p = std::make_unique<TH2D>(
+      ";#sum E_{#pi^{0}};T_{prot}^{preFSI};T_{#pi+}^{preFSI};Count",
+      xbins.size() - 1, xbins.data(), ybins_prot.size() - 1, ybins_prot.data(),
+      ybins_piplus.size() - 1, ybins_piplus.data());
+  TotalNeutralE_1piplus_1p = std::make_unique<TH3D>(
       "TotalNeutralE_1piplus_1p",
-      ";#sum E_{neutral};T_{#pi+}^{preFSI};Row-normalized", 81, 0, 1, 50, 0, 1);
+      ";#sum E_{neutral};T_{prot}^{preFSI};T_{#pi+}^{preFSI};Count",
+      xbins.size() - 1, xbins.data(), ybins_prot.size() - 1, ybins_prot.data(),
+      ybins_piplus.size() - 1, ybins_piplus.data());
 
   Transparency[k1p_only] = TransparencyFact(k1p_only);
   Transparency[k1n_only] = TransparencyFact(k1n_only);
@@ -265,9 +336,40 @@ int main(int argc, char const *argv[]) {
       partstatus =
           NuHepMC::GR6::ReadParticleStatusIdDefinitions(evt.run_info());
 
-      std::cout << "Input file reports that it contains "
-                << NuHepMC::GC2::ReadExposureNEvents(evt.run_info())
-                << " events" << std::endl;
+      if (evt.run_info()->tools().size() &&
+          (evt.run_info()->tools().front().name == "GENIE")) {
+        isGENIE = true;
+      }
+
+      int min_pid = 0, max_pid = 0;
+      std::cout << "Process IDs:" << std::endl;
+      for (auto pid : proc_ids) {
+        std::cout << "\t" << pid.first << ": " << pid.second.first << std::endl;
+        min_pid = std::min(min_pid, pid.first);
+        max_pid = std::max(max_pid, pid.first);
+      }
+
+      std::cout << "Vertex Statuses:" << std::endl;
+      for (auto pid : vtxstatus) {
+        std::cout << "\t" << pid.first << ": " << pid.second.first << std::endl;
+      }
+
+      std::cout << "Particle Statuses:" << std::endl;
+      for (auto pid : partstatus) {
+        std::cout << "\t" << pid.first << ": " << pid.second.first << std::endl;
+      }
+
+      TrueChannelToFSTopo = std::make_unique<TH2D>(
+          "TrueChannelToFSTopo", ";FSTopo;TrueChannel;Count", kNumClass, 0,
+          kNumClass, max_pid - min_pid, min_pid, max_pid);
+
+      try {
+        std::cout << "Input file reports that it contains "
+                  << NuHepMC::GC2::ReadExposureNEvents(evt.run_info())
+                  << " events" << std::endl;
+      } catch (...) {
+        // pass
+      }
       std::cout << "Processed " << NEvents << " events";
     }
 
@@ -282,7 +384,7 @@ int main(int argc, char const *argv[]) {
       break;
     }
 
-    // if (NEvents > 1E5) {
+    // if (NEvents > 1E6) {
     //   break;
     // }
 
@@ -306,6 +408,12 @@ int main(int argc, char const *argv[]) {
                                                          ss.str().c_str());
   }
 
+  for (int i = 0; i < TrueChannelToFSTopo->GetXaxis()->GetNbins(); ++i) {
+    std::stringstream ss;
+    ss << Classification(i);
+    TrueChannelToFSTopo->GetXaxis()->SetBinLabel(i + 1, ss.str().c_str());
+  }
+
   TFile fout(out.c_str(), "RECREATE");
 
   TDirectory *dout = &fout;
@@ -313,42 +421,49 @@ int main(int argc, char const *argv[]) {
     dout = fout.mkdir(dir.c_str());
   }
 
-  RowNormTH2(PrimaryToFinalStateSmearing.get());
+  dout->WriteObject(TrueChannelToFSTopo.release(), "TrueChannelToFSTopo");
   dout->WriteObject(PrimaryToFinalStateSmearing.release(),
                     "PrimaryToFinalStateSmearing");
 
-  RowNormTH2(TotalNeutronKE_1p_only.get());
-  dout->WriteObject(CutOffZeroBin(TotalNeutronKE_1p_only.get()),
-                    "TotalNeutronKE_1p_only_nozero");
+  dout->WriteObject(PreFSIKinematics_1p.release(), "PreFSIKinematics_1p");
+
   dout->WriteObject(TotalNeutronKE_1p_only.release(), "TotalNeutronKE_1p_only");
-  RowNormTH2(TotalNeutralE_1p_only.get());
-  dout->WriteObject(CutOffZeroBin(TotalNeutralE_1p_only.get()),
-                    "TotalNeutralE_1p_only_nozero");
   dout->WriteObject(TotalNeutralE_1p_only.release(), "TotalNeutralE_1p_only");
-  RowNormTH2(TotalPi0E_1piplus_1p.get());
-  dout->WriteObject(CutOffZeroBin(TotalPi0E_1piplus_1p.get()),
-                    "TotalPi0E_1piplus_1p_nozero");
+
+  dout->WriteObject(PreFSIKinematics_1piplus_1p.get(),
+                    "PreFSIKinematics_1piplus_1p");
+  PreFSIKinematics_1piplus_1p->Smooth();
+  dout->WriteObject(PreFSIKinematics_1piplus_1p.release(),
+                    "PreFSIKinematics_1piplus_1p_smoothed");
+
   dout->WriteObject(TotalPi0E_1piplus_1p.release(), "TotalPi0E_1piplus_1p");
-  RowNormTH2(TotalNeutralE_1piplus_1p.get());
-  dout->WriteObject(CutOffZeroBin(TotalNeutralE_1piplus_1p.get()),
-                    "TotalNeutralE_1piplus_1p_nozero");
   dout->WriteObject(TotalNeutralE_1piplus_1p.release(),
                     "TotalNeutralE_1piplus_1p");
 
   for (auto &a : Transparency) {
     if (a.second.first) {
+      std::string name =
+          std::string(a.second.first->GetName()) + "_unperturbed";
+      dout->WriteObject(a.second.first.get(), name.c_str());
+
       a.second.first->Divide(a.second.second.get());
-      std::string name = a.second.first->GetName();
+      name = a.second.first->GetName();
       dout->WriteObject(a.second.first.release(), name.c_str());
+
       name = a.second.second->GetName();
       dout->WriteObject(a.second.second.release(), name.c_str());
     }
   }
   for (auto &a : Transparency_5deg) {
     if (a.second.first) {
+      std::string name =
+          std::string(a.second.first->GetName()) + "_unperturbed";
+      dout->WriteObject(a.second.first.get(), name.c_str());
+
       a.second.first->Divide(a.second.second.get());
-      std::string name = a.second.first->GetName();
+      name = a.second.first->GetName();
       dout->WriteObject(a.second.first.release(), name.c_str());
+
       name = a.second.second->GetName();
       dout->WriteObject(a.second.second.release(), name.c_str());
     }

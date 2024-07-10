@@ -20,6 +20,7 @@ enum Classification {
   k1piplus_1p,
   k1p_1n,
   k1p_any_n,
+  k1p_1gamma,
   k2p_only,
   k2p_any_n,
   k3p_any_n,
@@ -42,6 +43,8 @@ std::ostream &operator<<(std::ostream &os, Classification c) {
     return os << "1p, 1n";
   case k1p_any_n:
     return os << "1p, 2+n";
+  case k1p_1gamma:
+    return os << "1p, 1gamma";
   case k2p_only:
     return os << "2p";
   case k2p_any_n:
@@ -74,6 +77,8 @@ std::string to_string(Classification c) {
     return "k1p_only";
   case k1p_1n:
     return "k1p_1n";
+  case k1p_1gamma:
+    return "k1p_1gamma";
   case k2p_only:
     return "k2p_only";
   case k1n_only:
@@ -132,7 +137,8 @@ std::pair<std::string, std::string> TransparencyName(Classification c,
 }
 
 Classification
-GetClassification(std::vector<HepMC3::ConstGenParticlePtr> const &particles) {
+GetClassification(std::vector<HepMC3::ConstGenParticlePtr> const &particles,
+                  double ToGeV) {
 
   int nprotons = 0;
   int nneutrons = 0;
@@ -168,6 +174,12 @@ GetClassification(std::vector<HepMC3::ConstGenParticlePtr> const &particles) {
     case 14:
     case -14: {
       nlep++;
+      break;
+    }
+    case 22: { // ignore gammas < 15 MeV
+      if ((pt->momentum().e() * ToGeV) > 0.015) {
+        return kother;
+      }
       break;
     }
     default: {
@@ -219,33 +231,48 @@ GetClassification(std::vector<HepMC3::ConstGenParticlePtr> const &particles) {
   }
 }
 
-Classification PrimaryClassification(HepMC3::GenEvent &evt) {
-  return GetClassification(
-      NuHepMC::Event::GetPrimaryVertex(evt)->particles_out());
+std::vector<HepMC3::ConstGenParticlePtr>
+GetPreFSIParticles(HepMC3::GenEvent &evt, bool isGENIE = false) {
+  if (isGENIE) {
+    std::vector<HepMC3::ConstGenParticlePtr> prefsiparts;
+    for (auto const &pt : evt.particles()) {
+      if (pt->status() == 26) {
+        prefsiparts.push_back(pt);
+      }
+    }
+    for (auto const &pt :
+         NuHepMC::Event::GetPrimaryVertex(evt)->particles_out()) {
+      if ((std::abs(pt->pid()) >= 11) && (std::abs(pt->pid()) <= 16)) {
+        prefsiparts.push_back(pt);
+      }
+    }
+    return prefsiparts;
+  } else {
+    return NuHepMC::Event::GetPrimaryVertex(evt)->particles_out();
+  }
 }
 
-Classification FSClassification(HepMC3::GenEvent &evt) {
+Classification PrimaryClassification(HepMC3::GenEvent &evt, double ToGeV,
+                                     bool isGENIE = false) {
+  return GetClassification(GetPreFSIParticles(evt, isGENIE), ToGeV);
+}
+
+Classification FSClassification(HepMC3::GenEvent &evt, double ToGeV) {
   std::vector<HepMC3::ConstGenParticlePtr> fsparts;
   for (auto const &pt : evt.particles()) {
     if (pt->status() == NuHepMC::ParticleStatus::UndecayedPhysical) {
       fsparts.push_back(pt);
     }
   }
-  return GetClassification(fsparts);
+  return GetClassification(fsparts, ToGeV);
 }
 
 void RowNormTH2(TH2 *h2) {
   for (int j = 0; j < h2->GetYaxis()->GetNbins(); ++j) {
     double sum = 0;
     for (int i = 0; i < h2->GetXaxis()->GetNbins(); ++i) {
-      h2->SetBinContent(i + 1, j + 1,
-                        h2->GetBinContent(i + 1, j + 1) /
-                            (h2->GetYaxis()->GetBinWidth(j + 1) *
-                             h2->GetXaxis()->GetBinWidth(i + 1)));
-      h2->SetBinError(i + 1, j + 1,
-                      h2->GetBinError(i + 1, j + 1) /
-                          (h2->GetYaxis()->GetBinWidth(j + 1) *
-                           h2->GetXaxis()->GetBinWidth(i + 1)));
+      h2->SetBinContent(i + 1, j + 1, h2->GetBinContent(i + 1, j + 1));
+      h2->SetBinError(i + 1, j + 1, h2->GetBinError(i + 1, j + 1));
       sum += h2->GetBinContent(i + 1, j + 1);
     }
 
@@ -258,30 +285,26 @@ void RowNormTH2(TH2 *h2) {
   }
 }
 
-TH2D *CutOffZeroBin(TH2 *h2) {
-  std::vector<double> xbins, ybins;
-  xbins.push_back(h2->GetXaxis()->GetBinLowEdge(2));
-  for (int j = 1; j < h2->GetXaxis()->GetNbins(); ++j) {
-    xbins.push_back(h2->GetXaxis()->GetBinUpEdge(j + 1));
-  }
-  ybins.push_back(h2->GetYaxis()->GetBinLowEdge(1));
-  for (int j = 0; j < h2->GetYaxis()->GetNbins(); ++j) {
-    ybins.push_back(h2->GetYaxis()->GetBinUpEdge(j + 1));
+TH1D *CutOffZeroBin(TH1 *h, int rebinx = 1) {
+  std::vector<double> xbins;
+  xbins.push_back(h->GetXaxis()->GetBinLowEdge(2));
+  for (int j = 1; j < h->GetXaxis()->GetNbins(); ++j) {
+    xbins.push_back(h->GetXaxis()->GetBinUpEdge(j + 1));
   }
 
-  TH2D *h2c =
-      new TH2D((std::string(h2->GetName()) + "_nozero").c_str(),
-               (std::string(";") + h2->GetXaxis()->GetTitle() + ";" +
-                h2->GetYaxis()->GetTitle() + ";" + h2->GetZaxis()->GetTitle())
-                   .c_str(),
-               xbins.size() - 1, xbins.data(), ybins.size() - 1, ybins.data());
+  TH1D *hc = new TH1D((std::string(h->GetName()) + "_nozero").c_str(),
+                      (std::string(";") + h->GetXaxis()->GetTitle() + ";" +
+                       h->GetYaxis()->GetTitle())
+                          .c_str(),
+                      xbins.size() - 1, xbins.data());
 
-  for (int j = 0; j < h2c->GetYaxis()->GetNbins(); ++j) {
-    for (int i = 0; i < h2c->GetXaxis()->GetNbins(); ++i) {
-      h2c->SetBinContent(i + 1, j + 1, h2->GetBinContent(i + 2, j + 1));
-      h2c->SetBinError(i + 1, j + 1, h2->GetBinError(i + 2, j + 1));
-    }
+  for (int i = 0; i < hc->GetXaxis()->GetNbins(); ++i) {
+    hc->SetBinContent(i + 1, h->GetBinContent(i + 2));
+    hc->SetBinError(i + 1, h->GetBinError(i + 2));
   }
-
-  return h2c;
+  if (rebinx > 1) {
+    hc->RebinX(rebinx);
+  }
+  hc->SetDirectory(nullptr);
+  return hc;
 }
